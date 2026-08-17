@@ -1,0 +1,50 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; never cancel an in-progress deploy.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      # Whether the Astro project exists yet. Before it's scaffolded there is no
+      # package.json, so we skip the build (and the deploy) cleanly instead of
+      # failing the run.
+      built: ${{ steps.guard.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: guard
+        run: |
+          if [ -f package.json ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "No package.json yet — skipping build until the site is scaffolded."
+          fi
+      - name: Build with Astro
+        if: steps.guard.outputs.ready == 'true'
+        uses: withastro/action@v3
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.built == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

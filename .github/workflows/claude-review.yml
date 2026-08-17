@@ -1,0 +1,153 @@
+name: Claude Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+concurrency:
+  # Rapid consecutive pushes collapse to one review of the latest commit.
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Same-repo, non-draft PRs only. Fork PRs never run the agent.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      actions: read
+      # The agent runs `gh pr checks` (a statusCheckRollup GraphQL query) to
+      # confirm CI is green before approving. That reads the Checks API and the
+      # commit Statuses API — without these scopes the token gets a hard
+      # "Resource not accessible by integration" (403) on every run, forcing a
+      # spurious REQUEST_CHANGES because CI can't be verified.
+      checks: read
+      statuses: read
+      # Required by claude-code-action: it exchanges a GitHub OIDC token for
+      # Claude GitHub App credentials.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-node-deps
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          # Authenticate via Claude subscription (OAuth) instead of a billed API key.
+          # Generate with `claude setup-token` and store as the CLAUDE_CODE_OAUTH_TOKEN
+          # repo secret; the token expires periodically and must be regenerated.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The implement agent's PRs are authored by the Claude bot; reviewing
+          # them is the whole point. Allow only that bot, not "*".
+          allowed_bots: claude
+          prompt: |
+            You are running non-interactively in GitHub Actions. Do not ask questions;
+            proceed autonomously.
+
+            Read .github/claude/review-instructions.md and follow it exactly.
+            You are reviewing PR #${{ github.event.pull_request.number }} in this repository.
+            Write your verdict JSON to exactly this path: ${{ runner.temp }}/review-verdict.json
+          claude_args: |
+            --max-turns 30
+            --allowedTools "Read,Glob,Grep,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh issue view:*),Bash(git status:*),Bash(git branch:*),Bash(git rev-parse:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(npm run:*),Bash(npx astro:*),Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(grep:*),Bash(find:*)"
+
+      # Fail closed: a missing, malformed, or internally inconsistent verdict
+      # always becomes REQUEST_CHANGES, never a silent skip.
+      - name: Submit formal review
+        if: ${{ !cancelled() }}
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const path = `${process.env.RUNNER_TEMP}/review-verdict.json`;
+
+            function failClosed(reason) {
+              return {
+                event: 'REQUEST_CHANGES',
+                body: [
+                  '## 🤖 Claude review — no valid verdict',
+                  '',
+                  `The review agent did not produce a valid verdict (${reason}).`,
+                  'Requesting changes by default. Push a new commit or re-run the Claude Review workflow.',
+                ].join('\n'),
+              };
+            }
+
+            let review;
+            try {
+              const raw = fs.readFileSync(path, 'utf8');
+              const v = JSON.parse(raw);
+
+              const validVerdict = v.verdict === 'approve' || v.verdict === 'request_changes';
+              const validCriteria = Array.isArray(v.criteria) && v.criteria.every(
+                c => typeof c.criterion === 'string' && typeof c.met === 'boolean' && typeof c.evidence === 'string'
+              );
+              const validFindings = Array.isArray(v.findings) && v.findings.every(
+                f => typeof f.severity === 'string' && typeof f.description === 'string'
+              );
+
+              if (!validVerdict || !validCriteria || !validFindings) {
+                review = failClosed('schema validation failed');
+              } else {
+                // Consistency check: an approve verdict cannot coexist with an
+                // unmet criterion or a blocker/major finding.
+                const unmet = v.criteria.filter(c => !c.met);
+                const blocking = v.findings.filter(f => ['blocker', 'major'].includes(f.severity));
+                const effective = (v.verdict === 'approve' && (unmet.length || blocking.length))
+                  ? 'request_changes'
+                  : v.verdict;
+
+                const criteriaTable = v.criteria.length
+                  ? [
+                      '| Acceptance criterion | Met | Evidence |',
+                      '|---|---|---|',
+                      ...v.criteria.map(c => `| ${c.criterion} | ${c.met ? '✅' : '❌'} | ${c.evidence} |`),
+                    ].join('\n')
+                  : '_No acceptance criteria found on the linked issue._';
+
+                const findingsList = v.findings.length
+                  ? v.findings.map(f => {
+                      const loc = f.file ? ` — \`${f.file}${f.line ? ':' + f.line : ''}\`` : '';
+                      return `- **${f.severity}**${loc}: ${f.description}`;
+                    }).join('\n')
+                  : '_No findings._';
+
+                review = {
+                  event: effective === 'approve' ? 'APPROVE' : 'REQUEST_CHANGES',
+                  body: [
+                    `## 🤖 Claude review — ${effective === 'approve' ? 'approved' : 'changes requested'}`,
+                    '',
+                    v.summary || '',
+                    '',
+                    '### Acceptance criteria',
+                    criteriaTable,
+                    '',
+                    '### Findings',
+                    findingsList,
+                    ...(effective !== v.verdict
+                      ? ['', '> ⚠️ Agent verdict was `approve` but unmet criteria or blocking findings were present; downgraded to changes requested.']
+                      : []),
+                  ].join('\n'),
+                };
+              }
+            } catch (e) {
+              review = failClosed(e.code === 'ENOENT' ? 'verdict file missing' : `parse error: ${e.message}`);
+            }
+
+            await github.rest.pulls.createReview({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+              commit_id: context.payload.pull_request.head.sha,
+              event: review.event,
+              body: review.body,
+            });

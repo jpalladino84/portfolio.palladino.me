@@ -1,0 +1,105 @@
+# Autonomous Claude "address review feedback" agent.
+# Triggered when a collaborator adds the `revise` label to a PR (or via manual
+# dispatch). The agent reads the PR's REQUEST_CHANGES review + failing CI, pushes
+# fixes to the PR's own branch, and lets claude-review.yml re-review on the push.
+#
+# TRIGGER CAVEAT: GitHub runs `pull_request` workflows from the version of the
+# workflow file on the PR's HEAD branch, not the base branch. So the `revise`
+# label only fires this workflow on PRs whose branch already contains this file —
+# i.e. branches cut from main after this workflow merged. Implement-agent PRs
+# branch off main, so new PRs work automatically. For a PR whose branch predates
+# this workflow, the label is a no-op; use the `workflow_dispatch` path below
+# (`gh workflow run "Claude Address Review" -f pr_number=<N>`) or update the
+# branch with main first.
+name: Claude Address Review
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to address review feedback on
+        required: true
+        type: string
+
+concurrency:
+  # Per-PR group: queue duplicate triggers for the same PR; never cancel a run
+  # mid-fix.
+  group: claude-address-review-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  address:
+    # Runs on manual dispatch, or when a collaborator adds the `revise` label to a
+    # same-repo (non-fork) PR. Fork PRs never run the agent.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.label.name == 'revise' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: read
+      # Required by claude-code-action: it exchanges a GitHub OIDC token for
+      # Claude GitHub App credentials.
+      id-token: write
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+    steps:
+      # Consume the trigger before doing any work: drop the `revise` label so the
+      # run is one-shot per human add (mirrors implement swapping `ready`), and
+      # announce the run. No checkout needed — gh operates on the remote.
+      - name: Acknowledge and consume the trigger
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label revise || true
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "🤖 The address-review agent has started working on this PR's feedback. Follow along: $RUN_URL"
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Switch to the PR's head branch so the agent's commits land on the PR.
+      # Works for both the labeled and workflow_dispatch triggers.
+      - name: Check out the PR branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr checkout "$PR_NUMBER"
+
+      - uses: ./.github/actions/setup-node-deps
+
+      - uses: anthropics/claude-code-action@v1
+        env:
+          # The agent runs `gh` CLI commands (pr view, pr comment, …); the CLI
+          # needs a token in its environment to authenticate.
+          GH_TOKEN: ${{ github.token }}
+        with:
+          # Authenticate via Claude subscription (OAuth) instead of a billed API key.
+          # Generate with `claude setup-token` and store as the CLAUDE_CODE_OAUTH_TOKEN
+          # repo secret; the token expires periodically and must be regenerated.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are running non-interactively in GitHub Actions. Do not ask questions;
+            proceed autonomously.
+
+            Read .github/claude/address-review-instructions.md and follow it exactly.
+            You are addressing the review feedback on PR #${{ env.PR_NUMBER }} in this
+            repository. Fetch it yourself with `gh pr view ${{ env.PR_NUMBER }}`.
+          claude_args: |
+            --max-turns 50
+            --allowedTools "Read,Glob,Grep,Edit,Write,Bash(git:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(npm ci:*),Bash(npm install:*),Bash(npm run:*),Bash(npm test:*),Bash(npx astro:*),Bash(npx:*),Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(mkdir:*),Bash(mv:*),Bash(cp:*)"
+
+      - name: Report failure on the PR
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "🤖 The address-review agent failed. See the run log: $RUN_URL
+
+          To retry, re-add the \`revise\` label once the cause is understood (or re-run via workflow_dispatch)."

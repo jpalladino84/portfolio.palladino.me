@@ -1,0 +1,105 @@
+# Autonomous Claude implementation agent.
+# Triggered when a collaborator adds the `ready` label to an issue (or via manual
+# dispatch). The agent implements the issue on a branch and opens a PR.
+name: Claude Implement
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Issue number to implement
+        required: true
+        type: string
+
+jobs:
+  implement:
+    # Runs when a collaborator adds the "ready" label, or on manual dispatch.
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'ready'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      # Per-issue group: parallel issues run concurrently, duplicate triggers
+      # for the same issue queue. Never cancel a run mid-implementation.
+      group: claude-implement-${{ github.event.issue.number || inputs.issue_number }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      # Required by claude-code-action: it exchanges a GitHub OIDC token for
+      # Claude GitHub App credentials.
+      id-token: write
+    env:
+      ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
+    steps:
+      # Signal that work has started before setup, so the issue reflects "being
+      # worked on" as early as possible. Swaps the queue label (`ready`) for the
+      # active label (`in-progress`). No checkout needed — gh operates on the
+      # remote via --repo.
+      - name: Mark issue in progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label in-progress --remove-label ready --remove-label ready-for-review || true
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "🤖 The implementation agent has started working on this issue. Follow along: $RUN_URL"
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        env:
+          # The agent runs `gh` CLI commands (issue view, pr create, …); the CLI
+          # needs a token in its environment to authenticate.
+          GH_TOKEN: ${{ github.token }}
+        with:
+          # Authenticate via Claude subscription (OAuth) instead of a billed API key.
+          # Generate with `claude setup-token` and store as the CLAUDE_CODE_OAUTH_TOKEN
+          # repo secret; the token expires periodically and must be regenerated.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are running non-interactively in GitHub Actions. Do not ask questions;
+            proceed autonomously.
+
+            Read .github/claude/implement-instructions.md and follow it exactly.
+            Your task is GitHub issue #${{ env.ISSUE_NUMBER }} in this repository.
+            Fetch it yourself with `gh issue view ${{ env.ISSUE_NUMBER }}`.
+          claude_args: |
+            --max-turns 70
+            --allowedTools "Read,Glob,Grep,Edit,Write,Bash(git:*),Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh issue comment:*),Bash(gh pr create:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(npm ci:*),Bash(npm install:*),Bash(npm create:*),Bash(npm run:*),Bash(npm test:*),Bash(npx astro:*),Bash(npx:*),Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(mkdir:*),Bash(mv:*),Bash(cp:*)"
+
+      # A clean exit does NOT guarantee a PR was opened — the agent can finish
+      # successfully having produced nothing (e.g. the task requires editing
+      # files under `.github/`, which it is forbidden to touch). So only mark the
+      # issue `ready-for-review` when a PR for it actually exists; otherwise flag
+      # it for human attention. A PR is identified by its head branch, which the
+      # instructions require to be `claude/issue-<number>-<slug>`.
+      - name: Finalize issue state on success
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label in-progress || true
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName \
+                 --jq ".[] | select(.headRefName | startswith(\"claude/issue-${ISSUE_NUMBER}-\")) | .number" | head -n1)
+          if [ -n "$pr" ]; then
+            gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label ready-for-review || true
+          else
+            gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label agent-failed || true
+            gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "🤖 The agent run completed but opened no PR (no \`claude/issue-${ISSUE_NUMBER}-*\` branch found). This usually means the task could not be completed as specified — for example, it requires changes under \`.github/\`, which the agent is not allowed to modify. Such issues need a human. Run log: $RUN_URL"
+          fi
+
+      - name: Report failure on the issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label ready --remove-label in-progress --add-label agent-failed || true
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "🤖 The implementation agent failed. See the run log: $RUN_URL
+
+          To retry, fix anything noted in the log (or just re-add the \`ready\` label / re-run via workflow_dispatch)."

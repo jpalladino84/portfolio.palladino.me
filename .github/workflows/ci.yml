@@ -1,0 +1,28 @@
+name: CI
+
+# Runs on pull requests only. Pushes to main are validated by the Deploy
+# workflow's build step, so there's no separate main CI run to go red before
+# the Astro project is scaffolded.
+on:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-node-deps
+      - run: npm run check
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-node-deps
+      - run: npm run build
