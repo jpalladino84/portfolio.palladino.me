@@ -1,19 +1,14 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
-import { siteConfig } from "../config";
+import Hero from "../components/Hero.astro";
+import ProjectGrid from "../components/ProjectGrid.astro";
+import Footer from "../components/Footer.astro";
 ---
 
 <BaseLayout>
   <main>
-    <h1>{siteConfig.name}</h1>
-    <p>{siteConfig.tagline}</p>
+    <Hero />
+    <ProjectGrid />
   </main>
+  <Footer />
 </BaseLayout>
-
-<style>
-  main {
-    max-width: var(--content-max-width);
-    margin: 0 auto;
-    padding: var(--spacing-xl) var(--spacing-md);
-  }
-</style>

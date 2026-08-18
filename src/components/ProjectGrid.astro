@@ -1,0 +1,44 @@
+---
+import { getCollection } from "astro:content";
+import ProjectCard from "./ProjectCard.astro";
+
+const projects = await getCollection("projects");
+const sorted = [...projects].sort((a, b) => {
+  const orderA = a.data.order ?? Number.POSITIVE_INFINITY;
+  const orderB = b.data.order ?? Number.POSITIVE_INFINITY;
+  if (orderA !== orderB) return orderA - orderB;
+  return a.data.title.localeCompare(b.data.title);
+});
+---
+
+<section class="project-grid" aria-label="Projects">
+  <div class="grid">
+    {sorted.map((project) => <ProjectCard project={project} />)}
+  </div>
+</section>
+
+<style>
+  .project-grid {
+    max-width: var(--content-max-width);
+    margin: 0 auto;
+    padding: var(--spacing-lg) var(--spacing-md);
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: var(--spacing-lg);
+  }
+
+  @media (min-width: 40rem) {
+    .grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+
+  @media (min-width: 64rem) {
+    .grid {
+      grid-template-columns: repeat(3, 1fr);
+    }
+  }
+</style>
