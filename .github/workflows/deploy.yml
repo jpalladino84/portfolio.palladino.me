@@ -36,6 +36,10 @@ jobs:
       - name: Build with Astro
         if: steps.guard.outputs.ready == 'true'
         uses: withastro/action@v3
+        with:
+          # Astro requires Node >=22.12; the action defaults to Node 20, which
+          # fails the build. Match the Node version used by CI.
+          node-version: 22
 
   deploy:
     needs: build
