@@ -1,0 +1,82 @@
+---
+import { Image } from "astro:assets";
+import type { CollectionEntry } from "astro:content";
+
+interface Props {
+  project: CollectionEntry<"projects">;
+}
+
+const { project } = Astro.props;
+const { title, blurb, thumbnail, liveUrl, sourceUrl } = project.data;
+---
+
+<article class="project-card">
+  <Image src={thumbnail} alt={`Screenshot of ${title}`} width={480} height={320} class="thumbnail" />
+  <div class="body">
+    <h3>{title}</h3>
+    <p>{blurb}</p>
+    {
+      (liveUrl || sourceUrl) && (
+        <div class="links">
+          {liveUrl && (
+            <a href={liveUrl} rel="noopener noreferrer">
+              Live
+            </a>
+          )}
+          {sourceUrl && (
+            <a href={sourceUrl} rel="noopener noreferrer">
+              Source
+            </a>
+          )}
+        </div>
+      )
+    }
+  </div>
+</article>
+
+<style>
+  .project-card {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--color-border);
+    border-radius: 0.5rem;
+    overflow: hidden;
+    background: var(--color-bg);
+  }
+
+  .thumbnail {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 3 / 2;
+    object-fit: cover;
+    display: block;
+  }
+
+  .body {
+    padding: var(--spacing-md);
+  }
+
+  h3 {
+    margin: 0 0 var(--spacing-sm);
+    font-size: 1.25rem;
+  }
+
+  p {
+    margin: 0 0 var(--spacing-md);
+    color: var(--color-text-muted);
+  }
+
+  .links {
+    display: flex;
+    gap: var(--spacing-md);
+  }
+
+  .links a {
+    font-weight: 500;
+    text-decoration: none;
+  }
+
+  .links a:hover {
+    text-decoration: underline;
+  }
+</style>
