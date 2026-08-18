@@ -1,0 +1,19 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import { siteConfig } from "../config";
+---
+
+<BaseLayout>
+  <main>
+    <h1>{siteConfig.name}</h1>
+    <p>{siteConfig.tagline}</p>
+  </main>
+</BaseLayout>
+
+<style>
+  main {
+    max-width: var(--content-max-width);
+    margin: 0 auto;
+    padding: var(--spacing-xl) var(--spacing-md);
+  }
+</style>
